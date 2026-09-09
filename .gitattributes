@@ -1,0 +1,14 @@
+# Keep text files byte-stable (LF) across platforms; binary data stays binary.
+*                text=auto eol=lf
+*.md             text eol=lf
+*.py             text eol=lf
+*.csv            text eol=lf
+*.json           text eol=lf
+*.txt            text eol=lf
+*.yml            text eol=lf
+*.yaml           text eol=lf
+# Binary / generated data
+*.npz            binary
+*.ply            binary
+*.png            binary
+*.pt             binary

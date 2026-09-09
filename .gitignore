@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Matplotlib
+.mpl_cache/
+*.matplotlib/
+
+# Bulk / repeated generated data (the small committed data/sample set is kept)
+/data/full/
+/data/full*/
+/data/runs/
+/data/runs*/
+
+# Regenerable outputs
+results/
+paper/figs/
+
+# OS
+.DS_Store
+Thumbs.db

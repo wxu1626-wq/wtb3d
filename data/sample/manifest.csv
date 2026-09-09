@@ -1,0 +1,13 @@
+id,type,type_name,n_damaged_vertices,n_gt_points,file
+0,3,dent,40,236,scene_0000.npz
+1,4,deformation,376,676,scene_0001.npz
+2,0,healthy,0,0,scene_0002.npz
+3,1,lee_erosion,124,539,scene_0003.npz
+4,2,crack,139,791,scene_0004.npz
+5,1,lee_erosion,48,361,scene_0005.npz
+6,1,lee_erosion,55,195,scene_0006.npz
+7,0,healthy,0,0,scene_0007.npz
+8,4,deformation,564,2325,scene_0008.npz
+9,4,deformation,470,1015,scene_0009.npz
+10,4,deformation,376,1493,scene_0010.npz
+11,4,deformation,470,1338,scene_0011.npz

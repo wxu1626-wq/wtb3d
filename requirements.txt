@@ -1,0 +1,12 @@
+# wtb3d -- Python dependencies
+#
+# Core (required):
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+
+# Optional:
+#   Installing Open3D enables the native ICP path in baselines/classical_pipeline.py.
+#   Without it, a mathematically-equivalent scipy-based Kabsch point-to-point ICP
+#   runs automatically (results agree to within solver tolerance).
+open3d>=0.18
