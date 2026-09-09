@@ -4,6 +4,10 @@
 numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
+scikit-learn>=1.3
+
+# Optional (deep/ only, run on GPU box):
+# torch>=2.0
 
 # Optional:
 #   Installing Open3D enables the native ICP path in baselines/classical_pipeline.py.

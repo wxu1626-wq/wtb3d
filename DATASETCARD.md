@@ -137,6 +137,17 @@ Caveats:
 - Default full-view scan; occlusion is available but untested in the reference run.
 - Ground-truth assumes an exact undamaged CAD; real CAD may differ from the as-built blade.
 
-## 10. Attribution
+## 10. Evaluation protocol for learned methods (run_learned.py / deep/)
+- Scene-level stratified 80/20 train/test split by damage type (split seed 2024);
+  for 1000 scenes this is 801 train / 199 test.
+- Baseline tau and the learned decision threshold are tuned on TRAIN scenes only,
+  then frozen for the TEST evaluation (no test-set leakage).
+- The deep model additionally uses a 10% validation slice of the train scenes for
+  threshold selection and early stopping.
+- Scene i of a run is a deterministic function of the global seed: the same
+  (num, points, seed) always yields the same scenes for every method.
+
+## 11. Attribution
+
 Open research software (MIT). If used in a paper, cite the associated manuscript and add a
 software citation to this repository.

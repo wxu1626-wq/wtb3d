@@ -21,3 +21,4 @@ paper/figs/
 # OS
 .DS_Store
 Thumbs.db
+.idea/
