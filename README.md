@@ -136,15 +136,24 @@ both frozen on the held-out TEST set (all points).
 | method | type | P | R | F1 | IoU |
 |---|---|--:|--:|--:|--:|
 | baseline tau=2.0 | lee_erosion | 0.256 | 0.754 | 0.383 | 0.237 |
-| learned RF | lee_erosion | 0.878 | 0.679 | 0.766 | 0.620 |
+| learned RF | lee_erosion | 0.881 | 0.675 | 0.765 | 0.619 |
+| learned GBM | lee_erosion | 0.853 | 0.648 | 0.737 | 0.583 |
 | baseline tau=2.0 | crack | 0.319 | 0.549 | 0.404 | 0.253 |
-| learned RF | crack | 0.847 | 0.900 | 0.873 | 0.774 |
+| learned RF | crack | 0.851 | 0.897 | 0.874 | 0.776 |
+| learned GBM | crack | 0.836 | 0.901 | 0.868 | 0.766 |
 | baseline tau=2.0 | dent | 0.197 | 0.511 | 0.284 | 0.166 |
-| learned RF | dent | 0.925 | 0.832 | 0.876 | 0.779 |
+| learned RF | dent | 0.928 | 0.829 | 0.876 | 0.779 |
+| learned GBM | dent | 0.916 | 0.807 | 0.858 | 0.752 |
 | baseline tau=2.0 | deformation | 0.698 | 0.827 | 0.757 | 0.609 |
-| learned RF | deformation | 0.991 | 0.941 | 0.965 | 0.933 |
+| learned RF | deformation | 0.991 | 0.941 | 0.965 | 0.932 |
+| learned GBM | deformation | 0.990 | 0.936 | 0.962 | 0.927 |
 | baseline tau=2.0 | **MICRO** | 0.385 | 0.716 | **0.501** | 0.334 |
-| learned RF | **MICRO** | **0.935** | 0.888 | **0.911** | 0.836 |
+| baseline tau=2.0 | **MICRO** | 0.385 | 0.716 | **0.501** | 0.334 |
+| learned RF | **MICRO** | 0.937 | 0.886 | **0.911** | 0.836 |
+| learned GBM | **MICRO** | 0.928 | 0.878 | **0.902** | 0.822 |
+
+RF and GBM agree closely (GBM micro-F1 0.902), so the gain is a property of the
+context features, not of one particular tree-based implementation.
 
 Healthy scenes (false-alarm check): 23,361 FP points with the baseline vs 256 with the
 learned RF - the classifier suppresses LE/TE boundary artefacts almost completely.
@@ -161,10 +170,10 @@ See `deep/README.md` (requires `pip install torch`, run on your GPU box).
 
 ## Outputs
 - `results/baseline_<N>.csv`, `results/baseline_<N>_summary.csv`, `results/tau_sweep.csv`.
-- `results/learned_<N>_comparison.csv` - per-type P/R/F1/IoU + micro, baseline vs learned.
+- `results/learned_<N>_<model>_comparison.csv` - per-type P/R/F1/IoU + micro, baseline vs learned (one file per model: rf / gbm / mlp).
 - `results/pointnet_<N>_comparison.csv` - same table, PointNet (GPU run).
-- `results/config.json`, `results/learned_<N>_config.json`, `results/pointnet_<N>_config.json`.
-- `paper/figs/deviation_map.png`, `paper/figs/f1_by_type.png`, `paper/figs/learned_vs_baseline.png`.
+- `results/config.json`, `results/learned_<N>_<model>_config.json`, `results/pointnet_<N>_config.json`.
+- `paper/figs/deviation_map.png`, `paper/figs/f1_by_type.png`, `paper/figs/learned_vs_baseline_<model>.png`.
 
 ## Extending to deep / multimodal methods
 The NPZ format (points, normals, GT mask, true depth, per-scene metadata + the shared

@@ -180,18 +180,18 @@ def main():
                          tp=tp, fp=fp, fn=fn,
                          geo_mae_mm=np.nan, geo_rmse_mm=np.nan))
 
-    csv_path = os.path.join(args.out, "learned_%d_comparison.csv" % args.num)
+    csv_path = os.path.join(args.out, "learned_%d_%s_comparison.csv" % (args.num, args.model))
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader()
         for r in rows:
             w.writerow(r)
-    with open(os.path.join(args.out, "learned_%d_config.json" % args.num), "w") as f:
+    with open(os.path.join(args.out, "learned_%d_%s_config.json" % (args.num, args.model)), "w") as f:
         json.dump(dict(num=args.num, points=args.points, seed=args.seed,
                        model=args.model, n_est=args.n_est, k_local=args.k_local,
                        train_frac=args.train_frac, split_seed=args.split_seed,
                        best_tau_mm=best_tau, best_thr=best_thr,
                        n_train_pts=int(len(ytr)), feats=FEAT_NAMES), f, indent=2)
-    _plot(rows, os.path.join(args.figs, "learned_vs_baseline.png"))
+    _plot(rows, os.path.join(args.figs, "learned_vs_baseline_%s.png" % args.model))
 
     print("")
     print("=== LEARNED vs BASELINE  (%d test scenes, tau=%.1fmm, thr=%.3f) ===" % (
