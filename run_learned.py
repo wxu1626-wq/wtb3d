@@ -139,6 +139,11 @@ def main():
         if f1 > best_thr_f1:
             best_thr_f1, best_thr = f1, float(thr)
     print("learned decision threshold (train): %.3f  (train micro-F1 %.3f)" % (best_thr, best_thr_f1))
+    import joblib
+    model_path = os.path.join(args.out, "learned_%d_%s_model.joblib"
+                              % (args.num, args.model))
+    joblib.dump({"model": model, "thr": best_thr}, model_path)
+    print("model saved: %s" % model_path)
 
     # ---- evaluate both on TEST (all points) ----
     rows = []
@@ -207,6 +212,7 @@ def main():
                        model=args.model, n_est=args.n_est, k_local=args.k_local,
                        train_frac=args.train_frac, split_seed=args.split_seed,
                        best_tau_mm=best_tau, best_thr=best_thr,
+                       model_path=os.path.relpath(model_path),
                        n_train_pts=int(len(ytr)), feats=FEAT_NAMES), f, indent=2)
     _plot(rows, os.path.join(args.figs, "learned_vs_baseline_%s.png" % args.model))
 

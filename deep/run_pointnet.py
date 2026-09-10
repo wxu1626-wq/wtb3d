@@ -147,6 +147,8 @@ def main():
                     choices=BACKBONES)
     ap.add_argument("--depth-head", action="store_true")
     ap.add_argument("--depth-w", type=float, default=0.5)
+    ap.add_argument("--init-from", type=str, default="",
+                    help="optional .pt state_dict (e.g. pretrain_<b>_<n>.pt)")
     ap.add_argument("--out", type=str, default="results")
     args = ap.parse_args()
 
@@ -181,6 +183,11 @@ def main():
     pos_w = torch.tensor(n_neg / max(n_pos, 1), device=device)
     model = build_backbone(args.backbone, in_dim=7,
                            depth_head=args.depth_head).to(device)
+    if args.init_from:
+        st = torch.load(args.init_from, map_location=device)
+        missing, unexpected = model.load_state_dict(st, strict=False)
+        print("init-from %s: ckpt %d params, %d unexpected, %d missing"
+              % (args.init_from, len(st), len(unexpected), len(missing)))
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_w)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
@@ -266,6 +273,7 @@ def main():
                        device=device, epochs=args.epochs, batch=args.batch,
                        lr=args.lr, backbone=args.backbone,
                        depth_head=args.depth_head,
+                       init_from=(args.init_from or None),
                        train_frac=args.train_frac, split_seed=args.split_seed,
                        best_tau_mm=best_tau, best_thr=THR, best_val_f1=best_f1),
                   f, indent=2)

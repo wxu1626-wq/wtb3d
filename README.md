@@ -245,5 +245,33 @@ changing it. A natural next step is fusing the 3D deviation channel with 2D ther
 visual imagery (multimodal) - the per-scene GT is shared, so fusion can be supervised
 with the exact same labels.
 
+## Paper figures
+`python paper/make_figs.py` regenerates scenes with the exact run_learned.py seed-0
+protocol and writes `paper/figs/`:
+- `fig1_damage_gallery.png` (4 damage types, scan + GT overlay, full + zoom)
+- `fig2_deviation_field.png` (signed ICP deviation field, LE/TE artifact bands)
+- `fig4_scene_quantification.png` (scene-level area / volume / localization errors)
+- `fig7_tau_sweep.png` (baseline tau sweep P/R/F1)
+- `fig3_detection_comparison.png`, `fig5_fp_suppression.png`,
+  `fig6_feature_importance.png` (require `results/learned_<N>_rf_model.joblib`)
+
+## Robustness + ablation (CPU)
+- `python run_robustness.py --num 200` -- one RF trained on nominal-sensor train
+  split, then the SAME damage realizations re-scanned under 8 sensor settings
+  (noise 0.5/1.0 mm, dropout 0.3/0.5, angle 1.0/2.0 deg, trans 15 mm);
+  baseline + RF evaluated on the test split. -> `results/robustness_<N>.csv`
+- `python run_ablation.py --num 120` -- progressive 12-d feature ablation
+  (raw deviation -> local stats -> coherence -> location -> normals -> edge).
+  -> `results/ablation_<N>.csv`
+
+## Self-supervised pretraining (GPU box)
+```
+python deep/pretrain.py --num 1000 --epochs 30 --backbone dgcnn
+python deep/run_pointnet.py --num 1000 --backbone dgcnn \
+    --init-from results/pretrain_dgcnn_1000.pt
+```
+Pretraining target: |deviation| (mm) on ALL points of ALL scenes (no GT label
+consumed); the resulting weights initialize supervised fine-tuning.
+
 ## License
 MIT. See `LICENSE`.
