@@ -27,6 +27,10 @@ any learned / deep 3D / multimodal method should outperform.
   geometric MAE/RMSE, plus a threshold (tau) sweep and per-damage-type breakdown.
 - Learned method (RF/GBM/MLP) with a fair head-to-head protocol: tau / decision
   threshold tuned on train scenes only, frozen evaluation on a held-out test set.
+- Scene-level engineering metrics for inspectors: damage area (m2), volume (cm3),
+  centroid localization error (per damage type).
+- Swappable deep backbones behind `--backbone`: PointNet / PointNet++-style /
+  DGCNN / PointTransformer (same benchmark, same protocol).
 - A committed 12-scene sample in `data/sample/` so the whole pipeline is testable in seconds.
 
 ## Repository layout
@@ -42,15 +46,18 @@ wtb3d/
   baselines/
     classical_pipeline.py    ICP -> point-to-plane signed distance -> smoothing
     evaluate.py              point-level P/R/F1/IoU + geometric MAE/RMSE
+    scene_metrics.py         scene-level area / volume / localization metrics
   learned/
     features.py              per-point feature extraction (12-d) + PointNet input (7-d)
     models.py                RF / GBM / MLP wrappers
   deep/                      PyTorch (run on a GPU box; see deep/README.md)
-    dataset.py               in-memory dataset over generated scenes
+    dataset.py               in-memory dataset + per-scene kNN precompute
     pointnet.py              PointNet-style per-point segmentation (+ depth head)
-    run_pointnet.py          train/eval driver, same protocol as run_learned.py
+    backbones.py             pointnet / pointnetpp / dgcnn / pointtransformer
+    run_pointnet.py          train/eval driver (--backbone), same protocol
   run_baseline.py            driver: classical baseline over N scenes
   run_learned.py             driver: learned classifier vs baseline (head-to-head)
+  run_scene_metrics.py       driver: scene-level area/vol/localization of the baseline
   data/sample/               committed 12-scene sample + reference.npz + manifest.csv
   results/                   (generated) baseline / learned CSVs + config.json
   paper/figs/                (generated) figures
@@ -78,6 +85,8 @@ Full-scale runs (1000 scenes, ~15 min each on a 24-core CPU box):
 python run_baseline.py --num 1000 --points 20000
 python run_learned.py  --num 1000 --points 20000 --model rf --n-est 300
 python run_learned.py  --num 1000 --points 20000 --model gbm --n-est 600   # ablation
+python run_scene_metrics.py --num 1000 --points 20000 --tau 2.0
+python deep/run_pointnet.py --num 1000 --epochs 40 --backbone dgcnn        # GPU box
 ```
 
 ## The data model
@@ -162,16 +171,52 @@ the same deviation field); a genuine depth improvement requires a regression hea
 (see `deep/`, `--depth-head`).
 
 ## The deep method (GPU)
-`deep/` contains a PointNet-style per-point segmentation network (shared Conv1d MLP +
-global max-pool context + per-point sigmoid head, optional depth-regression head)
-trained on the 7-d per-point input (aligned xyz, normal, deviation). It uses the exact
-same scenes and split as `run_learned.py`, so its test numbers drop into the same table.
+`deep/` trains per-point segmentation networks on the exact same scenes and split as
+`run_learned.py`, so its test numbers drop into the same table. Four swappable
+backbones share one interface (7-d per-point features [aligned xyz, normal, dev_mm]
++ precomputed scene-local kNN + valid-point mask; optional `--depth-head`):
+
+| backbone | description |
+|---|---|
+| `pointnet` | classic shared-MLP PointNet + global context (ignores kNN) |
+| `pointnetpp` | fixed-resolution 2-stage PointNet++ w/ kNN max-pool context |
+| `dgcnn` | 2-layer dynamic-graph CNN (EdgeConv) |
+| `pointtransformer` | 2-layer kNN relative-position self-attention |
+
+All report point-level P/R/F1/IoU plus the scene-level engineering metrics.
 See `deep/README.md` (requires `pip install torch`, run on your GPU box).
+
+## Scene-level engineering metrics (where / how big / how much)
+Point-level F1 says whether the points look right; an inspector also needs WHERE the
+damage is, HOW BIG it is (m2), and HOW MUCH material is affected (cm3,
+shallow-defect approximation V = sum depth_i x a_w, a_w = S_mesh / n).
+
+- `run_scene_metrics.py` reports these for the classical baseline at any tau.
+- `run_learned.py` and `deep/run_pointnet.py` report the same quantities per damage
+  type for both the learned mask and the baseline mask: mean GT/predicted area (m2)
+  + MAE, mean GT/predicted volume (cm3) + MAE, centroid localization error (m) and
+  the fraction of scenes localized within 0.5 m.
+
+**Classical baseline, tau = 2.0 mm, 1000 scenes:**
+
+| type | n | area gt (m2) | area pred (m2) | area MAE (m2) | vol gt (cm3) | vol pred (cm3) | vol MAE (cm3) | centroid err (m) | loc OK (<0.5 m) |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| lee_erosion | 218 | 0.176 | 0.513 | 0.337 | 601 | 2180 | 1579 | 0.992 | 22% |
+| crack | 207 | 0.353 | 0.597 | 0.245 | 916 | 2324 | 1408 | 0.163 | 100% |
+| dent | 242 | 0.200 | 0.507 | 0.307 | 473 | 2082 | 1609 | 1.064 | 21% |
+| deformation | 192 | 0.866 | 1.072 | 0.206 | 3987 | 5203 | 1215 | 0.470 | 65% |
+| healthy | 141 | 0.000 | 0.403 | 0.403 | 0 | 1711 | - | - | - |
+
+The global threshold over-predicts area/volume by 2-4x (LE/TE artefacts dilute the
+mask) and mislocalizes patch-like damage (lee erosion, dent) by ~1 m because the
+artefact band, not the damage, dominates the predicted mask.
 
 ## Outputs
 - `results/baseline_<N>.csv`, `results/baseline_<N>_summary.csv`, `results/tau_sweep.csv`.
 - `results/learned_<N>_<model>_comparison.csv` - per-type P/R/F1/IoU + micro, baseline vs learned (one file per model: rf / gbm / mlp).
-- `results/pointnet_<N>_comparison.csv` - same table, PointNet (GPU run).
+- `results/scene_metrics_baseline_<N>.csv` - baseline scene-level area/vol/localization.
+- `results/learned_<N>_<model>_scene.csv` - learned vs baseline scene metrics (per model).
+- `results/<backbone>_<N>_comparison.csv`, `_scene.csv`, `_config.json`, `_ckpt.pt` (deep, per backbone).
 - `results/config.json`, `results/learned_<N>_<model>_config.json`, `results/pointnet_<N>_config.json`.
 - `paper/figs/deviation_map.png`, `paper/figs/f1_by_type.png`, `paper/figs/learned_vs_baseline_<model>.png`.
 

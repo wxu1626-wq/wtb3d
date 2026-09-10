@@ -49,10 +49,11 @@ def deviation_field(scen, nominal, nominal_nrm, tree):
 def extract_scene_features(scen, nominal, nominal_nrm, tree, k_local=12):
     """Run the classical deviation pipeline on one scene and build features.
 
-    Returns (X, y, dev_mm):
-      X      (n, 12) float32 feature matrix
-      y      (n,)    bool ground-truth damage mask
-      dev_mm (n,)    float32 signed deviation (mm)
+    Returns (X, y, dev_mm, aligned):
+      X       (n, 12) float32 feature matrix
+      y       (n,)    bool ground-truth damage mask
+      dev_mm  (n,)    float32 signed deviation (mm)
+      aligned (n, 3)  float32 ICP-aligned scan coords (m)
     """
     aligned, dev_mm = deviation_field(scen, nominal, nominal_nrm, tree)
     pts = scen["scanned"]
@@ -78,17 +79,19 @@ def extract_scene_features(scen, nominal, nominal_nrm, tree, k_local=12):
                          lstd, lmax, coh, aligned[:, 0], aligned[:, 2],
                          nr[:, 0], nr[:, 2], nrm_disp, edge])
     y = scen["gt_mask"].astype(bool)
-    return X.astype(np.float32), y, dev_mm.astype(np.float32)
+    return (X.astype(np.float32), y, dev_mm.astype(np.float32),
+            aligned.astype(np.float32))
 
 
 def extract_pointnet_features(scen, nominal, nominal_nrm, tree):
     """Per-point (7-d) features for the PyTorch PointNet model:
     aligned xyz (m), scanned normal xyz, dev_mm.
 
-    Returns (X, y, dev_mm) with X (n, 7) float32.
+    Returns (X, y, dev_mm, aligned) with X (n, 7) float32.
     """
     aligned, dev_mm = deviation_field(scen, nominal, nominal_nrm, tree)
     nr = scen["scanned_nrm"]
     X = np.column_stack([aligned, nr, dev_mm])
     y = scen["gt_mask"].astype(bool)
-    return X.astype(np.float32), y, dev_mm.astype(np.float32)
+    return (X.astype(np.float32), y, dev_mm.astype(np.float32),
+            aligned.astype(np.float32))

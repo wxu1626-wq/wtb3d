@@ -1,18 +1,27 @@
-"""Train + evaluate the PointNet-style model (requires torch, run on GPU box).
+"""Train + evaluate swappable point-cloud backbones (requires torch, GPU box).
+
+Backbones (same benchmark, same protocol):
+  pointnet           classic shared-MLP PointNet (deep/pointnet.py)
+  pointnetpp         fixed-resolution 2-stage PointNet++ w/ knn context
+  dgcnn              2-layer dynamic-graph CNN (EdgeConv)
+  pointtransformer   2-layer kNN relative-position self-attention
 
 Protocol (matches run_learned.py exactly):
   * same seeds -> same scenes, same stratified scene-level split
   * decision threshold tuned on a VAL split (10% of train scenes) only
   * baseline tau tuned on TRAIN only; both frozen and evaluated on TEST
+  * scene-level engineering metrics (area / volume / localization) are
+    reported for BOTH the learned mask and the classical mask
   * depth head (optional) regresses |deviation| (mm) on GT-damaged points
 
 Usage:
   pip install torch            # CPU or CUDA build
-  python deep/run_pointnet.py --num 1000 --epochs 40
-Outputs:
-  results/pointnet_<num>_comparison.csv
-  results/pointnet_<num>_config.json
-  results/pointnet_<num>_ckpt.pt  (best-val checkpoint)
+  python deep/run_pointnet.py --num 1000 --epochs 40 --backbone dgcnn
+Outputs (per backbone):
+  results/<backbone>_<num>_comparison.csv
+  results/<backbone>_<num>_scene.csv
+  results/<backbone>_<num>_config.json
+  results/<backbone>_<num>_ckpt.pt  (best-val checkpoint)
 """
 import os, sys, csv, json, time, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,14 +31,29 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from data_gen.config import GenConfig
+from data_gen.geometry import loft_blade
 from data_gen import damage as dm
 from deep.dataset import (build_arrays, SceneDataset, pad_collate,
                           stratified_scene_split)
-from deep.pointnet import PointNetSeg
+from deep.backbones import build_backbone
 from baselines.evaluate import prf, geo_err
+from baselines.scene_metrics import (mesh_area, scene_damage_metrics,
+                                     aggregate_scene_metrics)
 
 TYPE_ORDER = [dm.LEE, dm.CRACK, dm.DENT, dm.DEFORM, dm.HEALTHY]
+BACKBONES = ["pointnet", "pointnetpp", "dgcnn", "pointtransformer"]
 TAUS = [0.5, 1, 2, 3, 5, 8, 12, 20]
+
+THR = 0.5  # set by main() before evaluate() is used
+
+
+def blade_mesh_area():
+    """Nominal blade surface area (m2) for the default blade geometry."""
+    cfg = GenConfig(num_scenes=1, points=1, n_ref=1, seed=0, out_dir="data")
+    V, F, N = loft_blade(cfg.n_sections, cfg.n_airfoil, cfg.span,
+                         cfg.c_root, cfg.c_tip, cfg.twist_deg)
+    return mesh_area(V, F)
 
 
 def scene_slice(arrays, i):
@@ -48,9 +72,9 @@ def micro_f1(mask, y):
 def predict_probs(model, loader, device):
     probs, devs, yss = [], [], []
     model.eval()
-    for X, y, dv, mask in loader:
-        X = X.to(device); mask = mask.to(device)
-        out = model(X)
+    for X, y, dv, mask, knn in loader:
+        X, mask, knn = X.to(device), mask.to(device), knn.to(device)
+        out = model(X, mask, knn)
         logits = out[0] if isinstance(out, tuple) else out
         probs.append(torch.sigmoid(logits)[mask].cpu())
         devs.append(dv[mask])
@@ -58,14 +82,16 @@ def predict_probs(model, loader, device):
     return torch.cat(probs), torch.cat(devs), torch.cat(yss)
 
 
-def evaluate(arrays, scene_idx, pred, baseline_tau, device):
-    """Per-type + micro metrics on a set of scenes.
+def evaluate(arrays, scene_idx, pred, baseline_tau, S_mesh, method_name):
+    """Per-type + micro point-level metrics AND scene-level engineering
+    metrics, for both the learned mask and the classical mask.
 
-    pred: dict scene_idx -> (prob_array, dev_array) or callable.
+    Returns (rows, scene_rows_learned, scene_rows_baseline).
     """
     acc = {t: dict(tp=0, fp=0, fn=0) for t in TYPE_ORDER}
     accb = dict(acc)
     geo = {t: [] for t in TYPE_ORDER}
+    sl, sb = [], []
     for i in scene_idx:
         a, b = scene_slice(arrays, i)
         y = arrays["y"][a:b]
@@ -79,9 +105,15 @@ def evaluate(arrays, scene_idx, pred, baseline_tau, device):
         g = geo_err(dev * 1e-3, arrays["gt_depth_mm"][a:b], y)
         if g["n"]:
             geo[t].append(g)
+        pts = arrays["X"][a:b, :3]
+        a_w = S_mesh / (b - a)
+        sl.append(scene_damage_metrics(mask_l, y, pts, dev,
+                                       arrays["gt_depth_mm"][a:b], a_w))
+        sb.append(scene_damage_metrics(mask_b, y, pts, dev,
+                                       arrays["gt_depth_mm"][a:b], a_w))
     rows = []
     for m, A in (("baseline_tau%.1f" % baseline_tau, accb),
-                 ("pointnet", acc)):
+                 (method_name, acc)):
         for t in TYPE_ORDER:
             a = A[t]
             p = a["tp"] / (a["tp"] + a["fp"]) if (a["tp"] + a["fp"]) else 0.0
@@ -95,10 +127,7 @@ def evaluate(arrays, scene_idx, pred, baseline_tau, device):
                              tp=a["tp"], fp=a["fp"], fn=a["fn"],
                              geo_mae_mm=float(np.mean(maes)) if maes else np.nan,
                              geo_rmse_mm=float(np.mean(rmses)) if rmses else np.nan))
-    return rows
-
-
-THR = 0.5  # set by main() before evaluate() is used
+    return rows, sl, sb
 
 
 def main():
@@ -114,6 +143,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--backbone", type=str, default="pointnet",
+                    choices=BACKBONES)
     ap.add_argument("--depth-head", action="store_true")
     ap.add_argument("--depth-w", type=float, default=0.5)
     ap.add_argument("--out", type=str, default="results")
@@ -124,6 +155,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     arrays = build_arrays(args.num, args.points, args.n_ref, args.seed)
+    S_mesh = blade_mesh_area()
     train_idx, test_idx = stratified_scene_split(arrays["types"], args.train_frac,
                                                  args.split_seed)
     rsplit = np.random.default_rng(args.split_seed + 1)
@@ -147,7 +179,8 @@ def main():
 
     n_pos = int(y_tr.sum()); n_neg = len(y_tr) - n_pos
     pos_w = torch.tensor(n_neg / max(n_pos, 1), device=device)
-    model = PointNetSeg(in_dim=7, depth_head=args.depth_head).to(device)
+    model = build_backbone(args.backbone, in_dim=7,
+                           depth_head=args.depth_head).to(device)
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_w)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
@@ -156,10 +189,11 @@ def main():
     for ep in range(args.epochs):
         model.train()
         t0 = time.time(); tot, npts = 0.0, 0
-        for X, y, dv, mask in fit_ld:
-            X, y, dv, mask = (z.to(device) for z in (X, y, dv, mask))
+        for X, y, dv, mask, knn in fit_ld:
+            X, y, dv, mask, knn = (z.to(device)
+                                   for z in (X, y, dv, mask, knn))
             opt.zero_grad()
-            out = model(X)
+            out = model(X, mask, knn)
             if isinstance(out, tuple):
                 logits, depth = out
                 loss = bce(logits[mask], y[mask])
@@ -181,7 +215,8 @@ def main():
             ep, tot / max(npts, 1), v_f1, best_thr, time.time() - t0))
         if v_f1 > best_f1:
             best_f1, best_thr = v_f1, float(best_thr)
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in model.state_dict().items()}
             patience = 0
         else:
             patience += 1
@@ -189,9 +224,10 @@ def main():
                 print("early stop at epoch %d" % ep)
                 break
 
+    tag = "%s_%d" % (args.backbone, args.num)
     if best_state is not None:
         model.load_state_dict(best_state)
-        torch.save(best_state, os.path.join(args.out, "pointnet_%d_ckpt.pt" % args.num))
+        torch.save(best_state, os.path.join(args.out, "%s_ckpt.pt" % tag))
     THR = best_thr
 
     # ---- final evaluation on TEST ----
@@ -203,28 +239,57 @@ def main():
         n = b - a
         per_scene[i] = (tp_[flat:flat + n].numpy(), td[flat:flat + n].numpy())
         flat += n
-    rows = evaluate(arrays, test_idx, per_scene, best_tau, device)
+    rows, sl, sb = evaluate(arrays, test_idx, per_scene, best_tau, S_mesh,
+                            args.backbone)
 
-    csv_path = os.path.join(args.out, "pointnet_%d_comparison.csv" % args.num)
+    csv_path = os.path.join(args.out, "%s_comparison.csv" % tag)
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader()
         for r in rows:
             w.writerow(r)
-    with open(os.path.join(args.out, "pointnet_%d_config.json" % args.num), "w") as f:
+
+    # ---- scene-level engineering metrics CSV ----
+    types_te = [int(arrays["types"][i]) for i in test_idx]
+    sm_l = aggregate_scene_metrics(sl, types_te, dm.TYPE_NAMES, TYPE_ORDER)
+    sm_b = aggregate_scene_metrics(sb, types_te, dm.TYPE_NAMES, TYPE_ORDER)
+    scene_csv = os.path.join(args.out, "%s_scene.csv" % tag)
+    with open(scene_csv, "w", newline="") as f:
+        fieldnames = ["method"] + list(sm_l[0].keys())
+        w = csv.DictWriter(f, fieldnames=fieldnames); w.writeheader()
+        for m, sm in (("baseline_tau%.1f" % best_tau, sm_b),
+                      (args.backbone, sm_l)):
+            for r in sm:
+                w.writerow(dict(method=m, **r))
+
+    with open(os.path.join(args.out, "%s_config.json" % tag), "w") as f:
         json.dump(dict(num=args.num, points=args.points, seed=args.seed,
                        device=device, epochs=args.epochs, batch=args.batch,
-                       lr=args.lr, depth_head=args.depth_head,
+                       lr=args.lr, backbone=args.backbone,
+                       depth_head=args.depth_head,
                        train_frac=args.train_frac, split_seed=args.split_seed,
                        best_tau_mm=best_tau, best_thr=THR, best_val_f1=best_f1),
                   f, indent=2)
 
     print("")
-    print("=== POINTNET vs BASELINE  (test, tau=%.1fmm, thr=%.2f) ===" % (best_tau, THR))
+    print("=== %s vs BASELINE  (test, tau=%.1fmm, thr=%.2f) ===" % (
+        args.backbone.upper(), best_tau, THR))
     for r in rows:
         print("  %-18s %-13s n=%3d P=%.3f R=%.3f F1=%.3f IoU=%.3f" % (
             r["method"], r["type_name"], r["n_scenes"], r["precision"],
             r["recall"], r["f1"], r["iou"]))
+    print("")
+    print("=== SCENE-LEVEL ENGINEERING METRICS (test) ===")
+    for m, sm in (("baseline_tau%.1f" % best_tau, sm_b),
+                  (args.backbone, sm_l)):
+        for r in sm:
+            print("  %-18s %-8s area %.4f->%.4f m2 (MAE %.4f) | vol %.2f->%.2f cm3 "
+                  "(MAE %.2f) | loc %.3f m ok %.0f%%" % (
+                      m, r["type_name"], r["area_gt_m2"], r["area_pred_m2"],
+                      r["area_abs_err_m2"], r["vol_gt_cm3"], r["vol_pred_cm3"],
+                      r["vol_mae_cm3"], r["centroid_err_m"],
+                      100 * r["loc_ok_rate"]))
     print("saved: %s" % csv_path)
+    print("saved: %s" % scene_csv)
 
 
 if __name__ == "__main__":

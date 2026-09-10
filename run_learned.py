@@ -31,6 +31,8 @@ from data_gen.sensor_sim import to_scan, build_reference
 from learned.features import extract_scene_features, FEAT_NAMES
 from learned.models import make_model
 from baselines.evaluate import prf, geo_err
+from baselines.scene_metrics import (mesh_area, scene_damage_metrics,
+                                     aggregate_scene_metrics)
 
 TYPE_ORDER = [dm.LEE, dm.CRACK, dm.DENT, dm.DEFORM, dm.HEALTHY]
 
@@ -69,6 +71,7 @@ def main():
     V, F, N = loft_blade(cfg.n_sections, cfg.n_airfoil, cfg.span,
                          cfg.c_root, cfg.c_tip, cfg.twist_deg)
     nominal, nominal_nrm = build_reference(V, F, N, cfg.n_ref, rng_ref)
+    S_mesh = mesh_area(V, F)
     tree = cKDTree(nominal)
 
     os.makedirs(args.out, exist_ok=True); os.makedirs(args.figs, exist_ok=True)
@@ -77,9 +80,9 @@ def main():
     for i in range(args.num):
         disp, lab, meta = dm.generate_damage(V, N, cfg, rng)
         scen = to_scan(V, F, N, disp, lab, cfg, rng, nominal, nominal_nrm)
-        X, y, dev_mm = extract_scene_features(scen, nominal, nominal_nrm, tree,
-                                              k_local=args.k_local)
-        scenes.append(dict(X=X, y=y, dev_mm=dev_mm,
+        X, y, dev_mm, aligned = extract_scene_features(scen, nominal, nominal_nrm, tree,
+                                                        k_local=args.k_local)
+        scenes.append(dict(X=X, y=y, dev_mm=dev_mm, aligned=aligned,
                            gt_depth_mm=scen["gt_depth_mm"].astype(np.float32),
                            type=meta["type"]))
         if (i + 1) % 100 == 0:
@@ -139,6 +142,7 @@ def main():
 
     # ---- evaluate both on TEST (all points) ----
     rows = []
+    sm_by_method = {}
     for method, pred_fn in [
         ("baseline_tau%.1f" % best_tau, lambda s: np.abs(s["dev_mm"]) > best_tau),
         ("learned_%s" % args.model, None),
@@ -146,6 +150,7 @@ def main():
         agg = {t: dict(tp=0, fp=0, fn=0) for t in TYPE_ORDER}
         geo = {t: [] for t in TYPE_ORDER}
         tot = dict(tp=0, fp=0, fn=0)
+        srows = []
         for i in te:
             s = scenes[i]
             mask = pred_fn(s) if pred_fn is not None else model.predict_proba(s["X"])[:, 1] > best_thr
@@ -156,6 +161,9 @@ def main():
             g = geo_err(s["dev_mm"] * 1e-3, s["gt_depth_mm"], s["y"])
             if g["n"]:
                 geo[t].append(g)
+            a_w = S_mesh / len(s["y"])
+            srows.append(scene_damage_metrics(mask, s["y"], s["aligned"],
+                                              s["dev_mm"], s["gt_depth_mm"], a_w))
         for t in TYPE_ORDER:
             a = agg[t]
             p = a["tp"] / (a["tp"] + a["fp"]) if (a["tp"] + a["fp"]) else 0.0
@@ -169,6 +177,8 @@ def main():
                              tp=a["tp"], fp=a["fp"], fn=a["fn"],
                              geo_mae_mm=float(np.mean(maes)) if maes else np.nan,
                              geo_rmse_mm=float(np.mean(rmses)) if rmses else np.nan))
+        sm_by_method[method] = aggregate_scene_metrics(
+            srows, [scenes[i]["type"] for i in te], dm.TYPE_NAMES, TYPE_ORDER)
         p, r, f1, iou, tp, fp, fn = _micro(
             np.concatenate([model.predict_proba(scenes[i]["X"])[:, 1] > best_thr
                             if method.startswith("learned") else
@@ -185,6 +195,13 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader()
         for r in rows:
             w.writerow(r)
+    scene_csv = os.path.join(args.out, "learned_%d_%s_scene.csv" % (args.num, args.model))
+    with open(scene_csv, "w", newline="") as f:
+        fieldnames = ["method"] + list(next(iter(sm_by_method.values()))[0].keys())
+        w = csv.DictWriter(f, fieldnames=fieldnames); w.writeheader()
+        for m, sm in sm_by_method.items():
+            for r in sm:
+                w.writerow(dict(method=m, **r))
     with open(os.path.join(args.out, "learned_%d_%s_config.json" % (args.num, args.model)), "w") as f:
         json.dump(dict(num=args.num, points=args.points, seed=args.seed,
                        model=args.model, n_est=args.n_est, k_local=args.k_local,
@@ -207,6 +224,16 @@ def main():
             b["type_name"], b["f1"], b["precision"], b["recall"],
             l["f1"], l["precision"], l["recall"]))
     print("saved: %s" % csv_path)
+    print("")
+    print("=== SCENE-LEVEL ENGINEERING METRICS (test) ===")
+    for m, sm in sm_by_method.items():
+        for r in sm:
+            print("  %-24s %-8s area %.4f->%.4f m2 (MAE %.4f) | vol %.2f->%.2f cm3 "
+                  "(MAE %.2f) | loc %.3f m ok %.0f%%" % (
+                      m, r["type_name"], r["area_gt_m2"], r["area_pred_m2"],
+                      r["area_abs_err_m2"], r["vol_gt_cm3"], r["vol_pred_cm3"],
+                      r["vol_mae_cm3"], r["centroid_err_m"], 100 * r["loc_ok_rate"]))
+    print("saved: %s" % scene_csv)
 
 
 def _plot(rows, path):

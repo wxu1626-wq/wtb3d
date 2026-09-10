@@ -2,6 +2,8 @@
 
 Uses the exact same scan generation + ICP deviation pipeline as
 run_learned.py (same seeds -> same scenes -> directly comparable numbers).
+Also precomputes per-point kNN indices (scene-local) for the
+graph / attention backbones (PointNet++-style, DGCNN, PointTransformer).
 """
 import os, sys
 import numpy as np
@@ -36,7 +38,7 @@ def stratified_scene_split(types, train_frac, seed):
             np.where(~is_train)[0].tolist())
 
 
-def build_arrays(num, points, n_ref, seed, verbose=True):
+def build_arrays(num, points, n_ref, seed, knn_k=16, verbose=True):
     """Generate all scenes once, return stacked numpy arrays.
 
     Returns dict with:
@@ -44,6 +46,8 @@ def build_arrays(num, points, n_ref, seed, verbose=True):
       y (N,) bool      gt damage mask
       dev_mm (N,)      signed deviation (mm)
       gt_depth_mm (N,) true damage depth (mm)
+      knn (N,K) int32  scene-local kNN indices (self removed; tiny scenes
+                       padded by repeating the last neighbour)
       offsets (S,)     start row of each scene in X
       lens (S,)        points per scene
       types (S,)       damage type per scene
@@ -59,15 +63,24 @@ def build_arrays(num, points, n_ref, seed, verbose=True):
     nominal, nominal_nrm = build_reference(V, F, N, cfg.n_ref, rng_ref)
     tree = cKDTree(nominal)
 
-    Xs, ys, devs, depths, types = [], [], [], [], []
+    Xs, ys, devs, depths, types, knns = [], [], [], [], [], []
     t0 = time.time()
     for i in range(num):
         disp, lab, meta = dm.generate_damage(V, N, cfg, rng)
         scen = to_scan(V, F, N, disp, lab, cfg, rng, nominal, nominal_nrm)
-        X, y, dev_mm = extract_pointnet_features(scen, nominal, nominal_nrm, tree)
+        X, y, dev_mm, _aligned = extract_pointnet_features(scen, nominal,
+                                                           nominal_nrm, tree)
         Xs.append(X); ys.append(y); devs.append(dev_mm)
         depths.append(scen["gt_depth_mm"].astype(np.float32))
         types.append(meta["type"])
+        n = len(X)
+        kk = max(1, min(knn_k, n - 1))
+        _, ii = cKDTree(X[:, :3]).query(X[:, :3], k=kk + 1)
+        ii = ii[:, 1:]                                   # drop self
+        if kk < knn_k:                                    # tiny scene: pad
+            ii = np.concatenate([ii] + [ii[:, -1:]
+                                        for _ in range(knn_k - kk)], axis=1)
+        knns.append(ii.astype(np.int32))
         if verbose and (i + 1) % 100 == 0:
             print("  gen %d/%d scenes, %.1fs" % (i + 1, num, time.time() - t0))
     lens = np.array([len(y) for y in ys])
@@ -75,6 +88,7 @@ def build_arrays(num, points, n_ref, seed, verbose=True):
     return dict(X=np.concatenate(Xs), y=np.concatenate(ys),
                 dev_mm=np.concatenate(devs),
                 gt_depth_mm=np.concatenate(depths),
+                knn=np.concatenate(knns),
                 offsets=offsets.astype(np.int64), lens=lens,
                 types=np.asarray(types))
 
@@ -97,23 +111,31 @@ class SceneDataset(Dataset):
         X = self.torch.from_numpy(self.arr["X"][a:b])
         y = self.torch.from_numpy(self.arr["y"][a:b].astype(np.float32))
         dev = self.torch.from_numpy(self.arr["dev_mm"][a:b])
-        return X, y, dev
+        knn = self.torch.from_numpy(self.arr["knn"][a:b])
+        return X, y, dev, knn
 
 
 def pad_collate(batch):
-    """Pad variable-length scenes to the batch max (masked in training)."""
+    """Pad variable-length scenes to the batch max (masked in training).
+
+    Returns (X (B,D,Nmax), Y (B,Nmax), DV (B,Nmax), mask (B,Nmax) bool,
+             KN (B,Nmax,K) long). Padded knn entries stay in-range.
+    """
     import torch
-    Xs, ys, devs = zip(*batch)
+    Xs, ys, devs, knns = zip(*batch)
     nmax = max(x.shape[0] for x in Xs)
     B, D = len(Xs), Xs[0].shape[1]
+    K = knns[0].shape[1]
     X = torch.zeros(B, D, nmax)
     Y = torch.zeros(B, nmax)
     DV = torch.zeros(B, nmax)
     mask = torch.zeros(B, nmax, dtype=torch.bool)
+    KN = torch.zeros(B, nmax, K, dtype=torch.long)
     for b in range(B):
         n = Xs[b].shape[0]
         X[b, :, :n] = Xs[b].T
         Y[b, :n] = ys[b]
         DV[b, :n] = devs[b]
         mask[b, :n] = True
-    return X, Y, DV, mask
+        KN[b, :n, :] = knns[b]
+    return X, Y, DV, mask, KN
