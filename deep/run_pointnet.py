@@ -16,19 +16,31 @@ Protocol (matches run_learned.py exactly):
 
 Usage:
   pip install torch            # CPU or CUDA build
-  python deep/run_pointnet.py --num 1000 --epochs 40 --backbone dgcnn
+  python deep/run_pointnet.py --num 1000 --epochs 40 --backbone dgcnn --batch 8 --cool 5
 Outputs (per backbone):
   results/<backbone>_<num>_comparison.csv
   results/<backbone>_<num>_scene.csv
   results/<backbone>_<num>_config.json
   results/<backbone>_<num>_ckpt.pt  (best-val checkpoint)
 """
-import os, sys, csv, json, time, argparse
+import os
+# ---- load guardrails: cap native thread pools BEFORE numpy/scipy/torch init ----
+# Oversubscribed OMP/BLAS thread pools were the top suspect for the 0x28
+# MEMORY_MANAGEMENT BSODs on the laptop. Override from the shell if needed.
+for _v, _d in (("OMP_NUM_THREADS", "4"), ("MKL_NUM_THREADS", "4"),
+               ("OPENBLAS_NUM_THREADS", "4")):
+    os.environ.setdefault(_v, _d)
+import sys, csv, json, time, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
 import torch.nn as nn
+try:  # cap torch's own pools (no-op if parallelism already started)
+    torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "4")))
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    pass
 from torch.utils.data import DataLoader
 
 from data_gen.config import GenConfig
@@ -143,6 +155,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--cool", type=float, default=0.0,
+                    help="sleep seconds between epochs (thermal/RAM relief, laptop)")
     ap.add_argument("--backbone", type=str, default="pointnet",
                     choices=BACKBONES)
     ap.add_argument("--depth-head", action="store_true")
@@ -198,6 +212,11 @@ def main():
         missing, unexpected = model.load_state_dict(st, strict=False)
         print("init-from %s: ckpt %d params, %d unexpected, %d missing"
               % (args.init_from, len(st), len(unexpected), len(missing)))
+    hb = os.path.join("work", "heartbeat_%s.txt" % args.backbone)
+    os.makedirs("work", exist_ok=True)
+    with open(hb, "a") as fh:
+        fh.write("t=%s START backbone=%s batch=%d cool=%.1f device=%s\n" % (
+            time.strftime("%H:%M:%S"), args.backbone, args.batch, args.cool, device))
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_w)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
@@ -230,6 +249,13 @@ def main():
         v_f1 = micro_f1(vp.numpy() > best_thr, vy.numpy() > 0.5)
         print("epoch %02d  loss=%.4f  valF1=%.4f (thr %.2f)  %.1fs" % (
             ep, tot / max(npts, 1), v_f1, best_thr, time.time() - t0))
+        with open(hb, "a") as fh:
+            fh.write("t=%s ep=%d valF1=%.4f thr=%.2f gpuMB=%.0f\n" % (
+                time.strftime("%H:%M:%S"), ep, v_f1, best_thr,
+                torch.cuda.max_memory_allocated(device) / 2**20
+                if device == "cuda" else 0))
+        if args.cool > 0:
+            time.sleep(args.cool)
         if v_f1 > best_f1:
             best_f1, best_thr = v_f1, float(best_thr)
             best_state = {k: v.detach().cpu().clone()
@@ -241,6 +267,10 @@ def main():
                 print("early stop at epoch %d" % ep)
                 break
 
+    if device == "cuda":
+        print("peak GPU mem: %.0f MB allocated / %.0f MB reserved" % (
+            torch.cuda.max_memory_allocated(device) / 2**20,
+            torch.cuda.max_memory_reserved(device) / 2**20))
     tag = "%s_%d" % (args.backbone, args.num)
     if best_state is not None:
         model.load_state_dict(best_state)
