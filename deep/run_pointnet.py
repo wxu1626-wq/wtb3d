@@ -73,10 +73,10 @@ def predict_probs(model, loader, device):
     probs, devs, yss = [], [], []
     model.eval()
     for X, y, dv, mask, knn in loader:
-        X, mask, knn = X.to(device), mask.to(device), knn.to(device)
-        out = model(X, mask, knn)
+        Xg, maskg, knng = X.to(device), mask.to(device), knn.to(device)
+        out = model(Xg, maskg, knng)
         logits = out[0] if isinstance(out, tuple) else out
-        probs.append(torch.sigmoid(logits)[mask].cpu())
+        probs.append(torch.sigmoid(logits)[maskg].cpu())
         devs.append(dv[mask])
         yss.append(y[mask])
     return torch.cat(probs), torch.cat(devs), torch.cat(yss)
@@ -89,7 +89,7 @@ def evaluate(arrays, scene_idx, pred, baseline_tau, S_mesh, method_name):
     Returns (rows, scene_rows_learned, scene_rows_baseline).
     """
     acc = {t: dict(tp=0, fp=0, fn=0) for t in TYPE_ORDER}
-    accb = dict(acc)
+    accb = {t: dict(acc[t]) for t in TYPE_ORDER}  # deep copy: shallow dict(acc) shares inner dicts
     geo = {t: [] for t in TYPE_ORDER}
     sl, sb = [], []
     for i in scene_idx:
@@ -212,7 +212,7 @@ def main():
                 loss = bce(out[mask], y[mask])
             loss.backward()
             opt.step()
-            tot += float(loss) * int(mask.sum()); npts += int(mask.sum())
+            tot += float(loss.detach()) * int(mask.sum()); npts += int(mask.sum())
         sched.step()
         vp, vd, vy = predict_probs(model, val_ld, device)
         best_thr = max(np.linspace(0.05, 0.95, 91),
