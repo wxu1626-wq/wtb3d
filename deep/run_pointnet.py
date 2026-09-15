@@ -156,7 +156,17 @@ def main():
     print("device:", device)
     os.makedirs(args.out, exist_ok=True)
 
-    arrays = build_arrays(args.num, args.points, args.n_ref, args.seed)
+    cache = os.path.join("work", "arrays_%d_%d_%d_%d.npz" % (
+        args.num, args.points, args.n_ref, args.seed))
+    if os.path.exists(cache):
+        z = np.load(cache)
+        arrays = {k: z[k] for k in z.files}
+        print("arrays loaded from cache: %s" % cache)
+    else:
+        arrays = build_arrays(args.num, args.points, args.n_ref, args.seed)
+        os.makedirs("work", exist_ok=True)
+        np.savez(cache, **arrays)
+        print("arrays saved to cache: %s" % cache)
     S_mesh = blade_mesh_area()
     train_idx, test_idx = stratified_scene_split(arrays["types"], args.train_frac,
                                                  args.split_seed)
@@ -302,3 +312,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
